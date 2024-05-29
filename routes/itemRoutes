@@ -1,0 +1,229 @@
+const express = require("express");
+const router = express.Router();
+const path = require("path");
+const multer = require("multer");
+const port = process.env.PORT;
+const Products = require("../productmodel");
+const jwt = require("jsonwebtoken");
+const jsonkey = process.env.jsonkey;
+const Users = require("../usermodel");
+
+const storage = multer.diskStorage({
+  destination: "./upload/images",
+  filename: (req, file, cb) => {
+    console.log("The requested field+++++++++", file);
+    const name = `${file.fieldname}_${Date.now()}${path.extname(
+      file.originalname
+    )}`;
+    cb(null, name);
+  },
+});
+
+const upload = multer({ storage: storage });
+
+router.post("/upload", upload.single("productImage"), (req, res) => {
+  try {
+    res.json({
+      success: 1,
+      image_url: `http://localhost:${port}/upload/images/${req.file.filename}`,
+    });
+  } catch (error) {
+    res.json({ message: error });
+  }
+});
+
+router.post("/addproduct", async (req, res) => {
+  let id;
+  console.log(req.body);
+  if (
+    req.body.productname == "" ||
+    !req.body.productname ||
+    req.body.oldprice == "" ||
+    !req.body.oldprice ||
+    !req.body.newprice ||
+    req.body.newprice == "" ||
+    req.body.imagefile == "" ||
+    req.body.category == ""
+  ) {
+    console.log("+++++++++++++++++++");
+    res.status(500).json({ error: "The field value should not be empty" });
+  } else {
+    const Products1 = await Products.find({}); //converted to an array
+    if (Products1.length > 0) {
+      const lastProduct_array = Products1.slice(-1); //take last object of the array
+      id = lastProduct_array[0].id + 1;
+    } else {
+      id = 0;
+    }
+    try {
+      const productInDB = new Products({
+        id: id,
+        name: req.body.productname,
+        image: req.body.imagefile,
+        category: req.body.category,
+        new_price: req.body.newprice,
+        old_price: req.body.oldprice,
+      });
+      console.log("Product in database", productInDB);
+      await productInDB.save();
+      console.log("Saved");
+      res.status(200).json({ name: req.body.productname, success: 1 });
+    } catch (err) {
+      res.status(500).json({ Error: `${err}` });
+    }
+  }
+});
+
+router.post("/removeProduct", async (req, res) => {
+  try {
+    console.log(req.body.id);
+    if (req.body.id === 0 || req.body.id) {
+      const products1 = await Products.find({});
+      const result = products1.find((item) => item.id === req.body.id);
+      console.log(result);
+      result
+        ? (await Products.findOneAndDelete({ id: req.body.id }),
+          res.json({ success: true, name: result.name }))
+        : res.json({ failure: "The id was not found in the database" });
+    } else {
+      console.log("The id is not in the request");
+      res.json({ message: "The id is not in the request" });
+    }
+  } catch (err) {
+    res.status(500).json({ Error: `${err}` });
+  }
+});
+
+router.get("/allProducts", async (req, res) => {
+  try {
+    const allProducts = await Products.find({});
+    res.status(200).json(allProducts);
+  } catch (err) {
+    res.status(500).json({ Error: `${err}` });
+  }
+});
+
+router.get("/newCollections", async (req, res) => {
+  try {
+    const products = await Products.find({});
+    const newCollections = products.slice(0).slice(-8);
+    res.send(newCollections);
+  } catch (error) {
+    res.send({ status: 500, message: "${error}" });
+  }
+});
+
+router.get("/popular/:category", async (req, res) => {
+  try {
+    const products = await Products.find({ category: req.params.category });
+    if (!products.length) {
+      return res
+        .status(404)
+        .json({ message: "No products found for this category" });
+    }
+    const popular = products.slice(0, 4);
+    res.status(200).json(popular);
+  } catch (error) {
+    console.error("Error fetching popular products:", error);
+    res
+      .status(500)
+      .json({ message: "An error occurred while fetching popular products" });
+  }
+});
+
+
+
+
+function authorize(req, res, next) {
+  const token = req.headers.authorization.split(" ")[1];
+
+  if (!token || token === "null") {
+    console.log(token);
+    return res
+      .status(403)
+      .send({ message: "Please login before you add to cart" });
+  } else {
+    jwt.verify(token, jsonkey, (err, decoded) => {
+      if (err) {
+        console.log("token validation failed", err);
+        return res.status(400).json({ message: "Token validation failed" });
+      } else {
+        console.log("token validation success", decoded);
+        req.id = decoded.id; //{decoded.id refers to the users table in MongoDB with _id:ObjectId("664e811c78d7eb6ee0095971")}
+        next();
+      }
+    });
+  }
+}
+router.post("/addToCart/:itemId", authorize, async (req, res) => {
+  try {
+    let fetchSingleUser = await Users.findOne({ _id: req.id });
+    const cartDataForSingleUser_Array = Object.entries(
+      fetchSingleUser.cartData
+    ).map(([cartDataKey, quantity]) => {
+      if (cartDataKey === req.params.itemId) {
+        quantity = quantity + 1;
+      }
+      return [cartDataKey, quantity];
+    });
+
+    const cartDataForSingleUser_Object = Object.fromEntries(
+      cartDataForSingleUser_Array
+    ); //convert array key-value pairs to object
+
+    await Users.findOneAndUpdate(
+      { _id: req.id },
+      { cartData: cartDataForSingleUser_Object }
+    );
+
+    res.status(200).json({
+      cartData: cartDataForSingleUser_Object,
+      message: `Item ${req.params.itemId} added to cart`,
+    });
+  } catch (error) {
+    console.error("Error adding item to cart:", error);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+router.post("/removeFromCart/:itemId", authorize, async (req, res) => {
+  try {
+    const findSingleUser = await Users.findOne({ _id: req.id });
+    const cartData = findSingleUser.cartData;
+
+    if (!cartData.hasOwnProperty(req.params.itemId)) {
+      return res
+        .status(403)
+        .json({ message: "The itemId is deleted from the inventory" });
+    } else if (cartData[req.params.itemId] === 0) {
+      return res
+        .status(400)
+        .json({ message: "The quantity for the specific itemId is 0 " });
+    } else {
+      cartData[req.params.itemId]--;
+    }
+    await Users.findOneAndUpdate({ _id: req.id }, { cartData: cartData });
+
+    res
+      .status(200)
+      .json({ message: `Item ${req.params.itemId} deleted from the cart` ,cartData:cartData});
+  } catch (err) {
+    res.status(500).send({ message: "Internal Server Error" });
+  }
+});
+
+//creating endpoint to get all cart data for a particular user
+router.get("/getCartDataForParticularUser", authorize, async (req, res) => {
+  try {
+    const findSingleUser = await Users.findOne({ _id: req.id });
+    const cartData = findSingleUser.cartData;
+    const cartDataArray = Object.entries(cartData).filter(
+      ([cartDataKey, quantity]) => quantity > 0
+    );
+    res.send(Object.fromEntries(cartDataArray));
+  } catch (error) {
+    res.send({ message: "Internal Server Error" });
+  }
+});
+
+module.exports = router;
